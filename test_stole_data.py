@@ -1,41 +1,50 @@
-from playwright.sync_api import sync_playwright
+from pathlib import Path
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
-AUTH_FILE = "auth_trademo_bot.json"
+PROFILE_DIR = str(Path("trademo-profile").resolve())
 
 def read_last_message(device_id: int | str):
     messages_url = f"https://trademo.io/ru/devices/device/{device_id}?tab=messages"
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(channel="chrome", headless=False)
-        context = browser.new_context(storage_state=AUTH_FILE)
-        page = context.new_page()
+        context = p.chromium.launch_persistent_context(
+            PROFILE_DIR,
+            channel="chrome",
+            headless=False,
+            viewport=None,
+        )
 
+        page = context.new_page()
         page.goto(messages_url, wait_until="domcontentloaded", timeout=60000)
 
-        # 1. первая карточка сообщения (последнее по времени)
         msg_cards = page.locator('a[href*="modal_message="]')
-        msg_cards.first.wait_for(timeout=10000)
+
+        try:
+            # ждём появление хотя бы одной карточки,
+            # но если их реально нет — по таймауту просто выходим
+            msg_cards.first.wait_for(timeout=15000)
+        except PlaywrightTimeoutError:
+            print("Сообщений нет или список не загрузился.")
+            context.close()
+            return
+
+        count = msg_cards.count()
+        if count == 0:
+            print("Сообщений нет.")
+            context.close()
+            return
+
         first_msg = msg_cards.first
 
         href = first_msg.get_attribute("href")
         print("Ссылка сообщения:", href)
 
-        # 2. Берём текст сообщения ИЗ ЭТОЙ КАРТОЧКИ
         msg_text = first_msg.locator("p.styles_messageText__TMXxy").inner_text()
         print("\n=== Текст из списка ===")
         print(msg_text)
 
-        # 3. Кликаем, чтобы открыть модалку (если нужно)
-        first_msg.click()
-
-        # Если в модалке другой селектор — потом заменим здесь:
-        # modal_text = page.locator("CSS_СЕЛЕКТОР_ТЕКСТА_В_МОДАЛКЕ").inner_text()
-        # print("\n=== Текст из модалки ===")
-        # print(modal_text)
-
-        input("\nПосмотрел глазами? Enter чтобы закрыть...")
+        # Никаких кликов, модалок и input — сразу закрываем
         context.close()
-        browser.close()
 
 if __name__ == "__main__":
     read_last_message(505655)
