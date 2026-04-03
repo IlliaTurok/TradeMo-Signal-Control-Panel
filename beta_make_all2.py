@@ -2,7 +2,7 @@ import asyncio
 import csv
 import random
 import re
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -18,10 +18,19 @@ api_hash = "2b593ec952b6dc6134f101d599f8600a"
 session_name = "TradeMo Bot"
 
 chat = "trademo_sup_bot"
-CONTROL_CHAT = "acspeaker"  # сюда впиши @username или ID чата
+
+CONTROL_CHATS = [
+    "@acspeaker",
+    "pio_boss"
+    # "@second_username",
+    # 123456789,
+    # -1001234567890,
+]
 
 PROFILE_DIR = str(Path("trademo-profile").resolve())
 TARGET_TEXT = "disabled"
+
+RUN_OFFLINE_TODAY_AT_START = True  # True = делать оффлайн-прогон при старте, False = сразу онлайн
 
 BASE_DIR = Path(".")
 DATA_DIR = BASE_DIR / "data"
@@ -47,8 +56,8 @@ BALANCE_RE = re.compile(
 
 NEXT_EVENT_ID = 1
 LAST_MESSAGE_BY_DEVICE = {}
+REQUEST_QUEUE = asyncio.Queue()
 
-# только для оффлайн-прогона
 OFFLINE_PLAYWRIGHT = None
 OFFLINE_BROWSER_CONTEXT = None
 OFFLINE_BROWSER_PAGE = None
@@ -165,6 +174,32 @@ def parse_url(raw_text: str):
             device_id = m.group(1)
 
     return source_url, device_id
+
+
+def extract_url_from_message_obj(msg):
+    urls = []
+
+    if msg.entities:
+        for ent in msg.entities:
+            if hasattr(ent, "url") and ent.url:
+                urls.append(ent.url)
+
+    if msg.buttons:
+        for row in msg.buttons:
+            for btn in row:
+                if getattr(btn, "url", None):
+                    urls.append(btn.url)
+
+    raw_text = msg.raw_text or ""
+    text_urls = re.findall(r"https?://[^\s)]+", raw_text, flags=re.IGNORECASE)
+    urls.extend(text_urls)
+
+    for u in urls:
+        m = DEVICE_URL_RE.search(u)
+        if m:
+            return u, m.group(1)
+
+    return "", None
 
 
 def parse_balance(msg_text: str):
@@ -318,7 +353,7 @@ async def init_offline_browser():
     OFFLINE_BROWSER_CONTEXT = await OFFLINE_PLAYWRIGHT.chromium.launch_persistent_context(
         PROFILE_DIR,
         channel="chrome",
-        headless=False,  # оффлайн показываем
+        headless=False,
         viewport=None,
     )
 
@@ -382,53 +417,58 @@ async def fetch_last_message_text_offline(device_id: str):
 async def fetch_last_message_text_online(device_id: str):
     messages_url = f"https://trademo.io/ru/devices/device/{device_id}?tab=messages"
 
-    await asyncio.sleep(random.uniform(1.2, 3.4))
-
-    playwright = None
-    context = None
-
-    try:
-        playwright = await async_playwright().start()
-
-        context = await playwright.chromium.launch_persistent_context(
-            PROFILE_DIR,
-            channel="chrome",
-            headless=True,  # онлайн не показываем
-            viewport=None,
-        )
-
-        page = context.pages[0] if context.pages else await context.new_page()
-
-        await page.goto(messages_url, wait_until="domcontentloaded", timeout=60000)
-
-        msg_cards = page.locator('a[href*="modal_message="]')
-        await msg_cards.first.wait_for(timeout=15000)
-
-        count = await msg_cards.count()
-        if count == 0:
-            return None
-
-        first_msg = msg_cards.first
-        msg_text = await first_msg.locator("p.styles_messageText__TMXxy").inner_text()
-        return msg_text
-
-    except PlaywrightTimeoutError:
-        return None
-    except Exception as e:
-        print(f"Ошибка ONLINE Playwright для устройства {device_id}: {e}")
-        return None
-    finally:
-        try:
-            if context is not None:
-                await context.close()
-        except Exception:
-            pass
+    for attempt in range(1, 4):
+        playwright = None
+        context = None
 
         try:
-            if playwright is not None:
-                await playwright.stop()
-        except Exception:
-            pass
+            await asyncio.sleep(random.uniform(1.2, 3.4))
+
+            playwright = await async_playwright().start()
+
+            context = await playwright.chromium.launch_persistent_context(
+                PROFILE_DIR,
+                channel="chrome",
+                headless=True,
+                viewport=None,
+            )
+
+            page = context.pages[0] if context.pages else await context.new_page()
+
+            await page.goto(messages_url, wait_until="domcontentloaded", timeout=60000)
+
+            msg_cards = page.locator('a[href*="modal_message="]')
+            await msg_cards.first.wait_for(timeout=15000)
+
+            count = await msg_cards.count()
+            if count == 0:
+                return None
+
+            first_msg = msg_cards.first
+            msg_text = await first_msg.locator("p.styles_messageText__TMXxy").inner_text()
+            return msg_text
+
+        except PlaywrightTimeoutError:
+            print(f"[ONLINE] Таймаут для устройства {device_id}, попытка {attempt}/3")
+        except Exception as e:
+            print(f"[ONLINE] Ошибка Playwright для устройства {device_id}, попытка {attempt}/3: {e}")
+        finally:
+            try:
+                if context is not None:
+                    await context.close()
+            except Exception:
+                pass
+
+            try:
+                if playwright is not None:
+                    await playwright.stop()
+            except Exception:
+                pass
+
+        if attempt < 3:
+            await asyncio.sleep(random.uniform(2.0, 4.5))
+
+    return None
 
 
 # ============ DUPLICATE LOGIC ============
@@ -445,20 +485,17 @@ def remember_last_message(device_id: str, site_message_text: str):
         LAST_MESSAGE_BY_DEVICE[device_id] = site_message_text
 
 
-# ============ OFFLINE YESTERDAY ============
+# ============ OFFLINE TODAY ============
 
-async def offline_yesterday(client: TelegramClient):
+async def offline_today(client: TelegramClient):
     today = datetime.now(LOCAL_TZ).date()
-    yesterday = today - timedelta(days=1)
 
     found_map = {}
 
     async for msg in client.iter_messages(chat):
         msg_local_date = msg.date.astimezone(LOCAL_TZ).date()
 
-        if msg_local_date < yesterday:
-            break
-        if msg_local_date != yesterday:
+        if msg_local_date != today:
             continue
 
         text = (msg.raw_text or "").lower()
@@ -469,25 +506,7 @@ async def offline_yesterday(client: TelegramClient):
         source_url, device_id = parse_url(msg.raw_text or "")
 
         if not device_id:
-            urls = []
-
-            if msg.entities:
-                for ent in msg.entities:
-                    if hasattr(ent, "url") and ent.url:
-                        urls.append(ent.url)
-
-            if msg.buttons:
-                for row in msg.buttons:
-                    for btn in row:
-                        if getattr(btn, "url", None):
-                            urls.append(btn.url)
-
-            for u in urls:
-                m = DEVICE_URL_RE.search(u)
-                if m:
-                    source_url = u
-                    device_id = m.group(1)
-                    break
+            source_url, device_id = extract_url_from_message_obj(msg)
 
         if device_id and device_id not in found_map:
             found_map[device_id] = {
@@ -501,7 +520,7 @@ async def offline_yesterday(client: TelegramClient):
 
     found = list(found_map.values())
 
-    print(f"Найдено устройств за вчера: {len(found)} -> {[x['device_id'] for x in found]}")
+    print(f"Найдено устройств за сегодня: {len(found)} -> {[x['device_id'] for x in found]}")
 
     for item in found:
         device_id = item["device_id"]
@@ -532,7 +551,7 @@ async def offline_yesterday(client: TelegramClient):
             device_raw=item["device_raw"],
             device_group=item["device_group"],
             device_name=item["device_name"],
-            source_time_text="offline_yesterday",
+            source_time_text="offline_today",
             source_url=item["source_url"],
             balance_value=None if duplicate else balance_value,
             balance_currency="" if duplicate else balance_currency,
@@ -547,35 +566,22 @@ async def offline_yesterday(client: TelegramClient):
         remember_last_message(device_id, msg_text)
 
 
-# ============ ONLINE LISTENER ============
+# ============ ONLINE QUEUE WORKER ============
 
-client = TelegramClient(session_name, api_id, api_hash)
+async def process_online_job(job):
+    device_id = job["device_id"]
+    device_raw = job["device_raw"]
+    device_group = job["device_group"]
+    device_name = job["device_name"]
+    source_time_text = job["source_time_text"]
+    event_time = job["event_time"]
+    source_url = job["source_url"]
 
-
-@client.on(events.NewMessage(chats=chat))
-async def handler(event):
-    text_upper = (event.raw_text or "").upper()
-    if TARGET_TEXT.upper() not in text_upper:
-        return
-
-    print("\n=== Новое сообщение с disabled ===")
-    print(event.raw_text)
-
-    device_raw, device_group, device_name = parse_device(event.raw_text or "")
-    source_time_text, event_time = parse_time_from_event(event)
-    source_url, device_id = parse_url(event.raw_text or "")
-
-    print(f"Устройство raw: {device_raw}, группа: {device_group}, имя: {device_name}")
-    print(f"Время: {event_time}, текст времени: {source_time_text}")
-    print(f"Ссылка: {source_url}, device_id: {device_id}")
-
-    if not device_id:
-        print("device_id не найден, пропускаю.")
-        return
+    print(f"\n[QUEUE] Обрабатываю устройство {device_id}")
 
     msg_text = await fetch_last_message_text_online(device_id)
     if not msg_text:
-        print("Не удалось получить последнее сообщение устройства.")
+        print(f"[QUEUE] Не удалось получить последнее сообщение устройства {device_id}.")
         return
 
     print("=== Текст последнего сообщения ===")
@@ -583,7 +589,7 @@ async def handler(event):
 
     duplicate = is_duplicate_message(device_id, msg_text)
     if duplicate:
-        print("Полный дубль по устройству. Balance будет пустым, сумма не обновится.")
+        print(f"[QUEUE] Полный дубль по устройству {device_id}. Balance будет пустым, сумма не обновится.")
 
     balance_value, balance_currency, balance_text = parse_balance(msg_text)
 
@@ -607,12 +613,68 @@ async def handler(event):
 
     remember_last_message(device_id, msg_text)
 
-    print("Записано в events.csv. daily_groups.csv пересобран только если это не дубль.")
+    print(f"[QUEUE] Записано в events.csv для устройства {device_id}.")
+
+
+async def online_worker():
+    print("[QUEUE] Worker запущен, жду задачи...")
+
+    while True:
+        job = await REQUEST_QUEUE.get()
+        try:
+            await process_online_job(job)
+        except Exception as e:
+            print(f"[QUEUE] Ошибка обработки задачи: {e}")
+        finally:
+            REQUEST_QUEUE.task_done()
+
+
+# ============ ONLINE LISTENER ============
+
+client = TelegramClient(session_name, api_id, api_hash)
+
+
+@client.on(events.NewMessage(chats=chat))
+async def handler(event):
+    text_upper = (event.raw_text or "").upper()
+    if TARGET_TEXT.upper() not in text_upper:
+        return
+
+    print("\n=== Новое сообщение с disabled ===")
+    print(event.raw_text)
+
+    device_raw, device_group, device_name = parse_device(event.raw_text or "")
+    source_time_text, event_time = parse_time_from_event(event)
+    source_url, device_id = parse_url(event.raw_text or "")
+
+    if not device_id:
+        source_url, device_id = extract_url_from_message_obj(event.message)
+
+    print(f"Устройство raw: {device_raw}, группа: {device_group}, имя: {device_name}")
+    print(f"Время: {event_time}, текст времени: {source_time_text}")
+    print(f"Ссылка: {source_url}, device_id: {device_id}")
+
+    if not device_id:
+        print("device_id не найден, пропускаю.")
+        return
+
+    job = {
+        "device_id": device_id,
+        "device_raw": device_raw,
+        "device_group": device_group,
+        "device_name": device_name,
+        "source_time_text": source_time_text,
+        "event_time": event_time,
+        "source_url": source_url,
+    }
+
+    await REQUEST_QUEUE.put(job)
+    print(f"[QUEUE] Задача добавлена для устройства {device_id}. Размер очереди: {REQUEST_QUEUE.qsize()}")
 
 
 # ============ COMMAND /SCRIPT ============
 
-@client.on(events.NewMessage(chats=CONTROL_CHAT, pattern=r"^/script$"))
+@client.on(events.NewMessage(chats=CONTROL_CHATS, pattern=r"^/script$"))
 async def send_script_files(event):
     try:
         update_daily_group_csv()
@@ -652,14 +714,19 @@ async def main():
     init_files()
     await client.start()
 
-    print("Запускаю разовый оффлайн-прогон за вчера...")
-    await init_offline_browser()
-    await offline_yesterday(client)
-    await close_offline_browser()
+    if RUN_OFFLINE_TODAY_AT_START:
+        print("Запускаю разовый оффлайн-прогон за сегодня...")
+        await init_offline_browser()
+        await offline_today(client)
+        await close_offline_browser()
+        print("Оффлайн-прогон завершён, браузер закрыт.")
+    else:
+        print("Оффлайн-прогон отключён, сразу перехожу в онлайн-режим.")
 
-    print("Оффлайн-прогон завершён, браузер закрыт.")
+    asyncio.create_task(online_worker())
+
     print("Перехожу в онлайн-режим, жду сигналы...")
-    print("Команда /script доступна в CONTROL_CHAT")
+    print("Команда /script доступна в CONTROL_CHATS")
 
     await client.run_until_disconnected()
 
