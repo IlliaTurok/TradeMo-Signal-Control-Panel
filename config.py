@@ -40,3 +40,8 @@ BALANCE_RE = re.compile(
     r"(Доступно[: ]+|Баланс[: ]+)([\d\s\u202f]+)\s*₽",
     re.IGNORECASE,
 )
+
+DEBT_RE = re.compile(
+    r"(Оплата|Платеж).*?на ([\d\s\u202f]+)\s*₽",
+    re.IGNORECASE,
+)

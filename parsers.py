@@ -1,6 +1,6 @@
 import re
 
-from config import BALANCE_RE, DEVICE_URL_RE, LOCAL_TZ
+from config import BALANCE_RE, DEBT_RE, DEVICE_URL_RE, LOCAL_TZ
 
 
 def parse_device(raw_text: str):
@@ -94,3 +94,17 @@ def parse_balance(msg_text: str):
         return None, "", ""
 
     return balance_value, "RUB", match.group(0)
+
+
+def parse_debt(msg_text: str):
+    match = DEBT_RE.search(msg_text or "")
+    if not match:
+        return None, ""
+
+    raw_num = match.group(2).replace(" ", "").replace("\u202f", "")
+    try:
+        debt_value = int(raw_num)
+    except ValueError:
+        return None, ""
+
+    return debt_value, match.group(0)

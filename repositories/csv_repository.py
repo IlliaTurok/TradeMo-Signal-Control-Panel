@@ -29,6 +29,8 @@ class CsvRepository:
                     "balance_value",
                     "balance_currency",
                     "balance_text",
+                    "debt_value",
+                    "debt_text",
                     "site_message_text",
                     "is_duplicate",
                 ])
@@ -36,6 +38,25 @@ class CsvRepository:
         else:
             with EVENTS_CSV.open("r", newline="", encoding="utf-8-sig") as f:
                 rows = list(csv.reader(f))
+                if rows:
+                    header = rows[0]
+                    expected_header = [
+                        "id", "datetime", "device_id", "device_raw", "device_group",
+                        "device_name", "source_time_text", "source_url", "balance_value",
+                        "balance_currency", "balance_text", "debt_value", "debt_text",
+                        "site_message_text", "is_duplicate"
+                    ]
+                    if len(header) < len(expected_header) or "debt_value" not in header:
+                        # Update schema: add missing columns with empty values
+                        updated_rows = [expected_header]
+                        for row in rows[1:]:
+                            while len(row) < len(expected_header):
+                                row.append("")
+                            updated_rows.append(row)
+                        with EVENTS_CSV.open("w", newline="", encoding="utf-8-sig") as fw:
+                            writer = csv.writer(fw)
+                            writer.writerows(updated_rows)
+                        print("Обновлена схема events.csv")
                 self.next_event_id = len(rows) if len(rows) > 1 else 1
 
         if not DAILY_CSV.exists():
@@ -72,6 +93,8 @@ class CsvRepository:
         balance_value,
         balance_currency: str,
         balance_text: str,
+        debt_value,
+        debt_text: str,
         site_message_text: str,
         is_duplicate: int,
     ):
@@ -89,6 +112,8 @@ class CsvRepository:
                 balance_value if balance_value is not None else "",
                 balance_currency,
                 balance_text,
+                debt_value if debt_value is not None else "",
+                debt_text,
                 site_message_text,
                 is_duplicate,
             ])

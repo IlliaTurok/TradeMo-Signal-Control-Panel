@@ -1,4 +1,4 @@
-from parsers import extract_url_from_message_obj, parse_balance, parse_device, parse_time_from_event, parse_url
+from parsers import extract_url_from_message_obj, parse_balance, parse_debt, parse_device, parse_time_from_event, parse_url
 
 
 def build_online_job_from_event(event):
@@ -55,6 +55,7 @@ async def process_online_job(job, repository, trademo_client):
         print(f"[QUEUE] Полный дубль по устройству {device_id}. Balance будет пустым, сумма не обновится.")
 
     balance_value, balance_currency, balance_text = parse_balance(msg_text)
+    debt_value, debt_text = parse_debt(msg_text)
 
     repository.write_event_row(
         dt=event_time,
@@ -67,6 +68,8 @@ async def process_online_job(job, repository, trademo_client):
         balance_value=None if duplicate else balance_value,
         balance_currency="" if duplicate else balance_currency,
         balance_text="" if duplicate else balance_text,
+        debt_value=debt_value,
+        debt_text=debt_text,
         site_message_text=msg_text,
         is_duplicate=1 if duplicate else 0,
     )
