@@ -1,4 +1,4 @@
-# TradeMo Signal Control Panel
+# Trading Signal Control Panel
 
 Production-oriented backend service that turns Telegram device alerts into verified, auditable events and ready-to-send reports.
 
