@@ -39,7 +39,7 @@ flowchart LR
     P --> R[repositories/csv_repository.py]
     R --> E[data/events.csv]
     R --> D[data/daily_groups.csv]
-    CMD[/script command] --> X[services/export_service.py]
+    CMD["/script report command"] --> X[services/export_service.py]
     X --> XLS[data/exports/*.xlsx]
 ```
 
