@@ -1,0 +1,11 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+*.session
+auth_trademo_bot.json
+TradeMo Bot.session
+trademo-profile/
+data/*.csv
+data/*.xlsx
+data/exports/

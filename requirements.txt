@@ -1,0 +1,7 @@
+telethon>=1.27.0
+playwright>=1.40.0
+openpyxl>=3.0.0
+
+# Notes:
+# - After installing, run: python -m playwright install chromium
+# - Pin versions as needed for production deployments.

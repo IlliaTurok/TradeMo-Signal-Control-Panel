@@ -1,114 +1,77 @@
-# Control_Panel
+# TradeMo Signal Control Panel
 
-Автоматизация обработки сигналов из Telegram и сбора данных по устройствам с trademo.io.
+Production-oriented backend service that turns Telegram device alerts into verified, auditable events and ready-to-send reports.
 
-Проект делает две вещи:
-- слушает сообщения в Telegram, фильтрует сигналы и пишет события в CSV;
-- по команде формирует Excel-отчеты и отправляет их в управляющий чат.
+I built a queue-driven pipeline that ingests Telegram messages, enriches them with site data using Playwright, deduplicates events, persists canonical records (CSV), and generates XLSX exports on demand. Configuration is environment-driven to support safe deployment.
 
-## Что умеет
+## Problem statement
 
-- Online-режим: ловит новые сообщения с ключевым словом disabled.
-- Offline-прогон: один раз собирает данные за вчера.
-- Антидубли: не суммирует одинаковые сообщения повторно.
-- Отчеты: формирует events.xlsx и daily_groups.xlsx.
+Operations teams were manually processing high-volume Telegram alerts to verify device payment status. The workflow involved opening device pages for each alert, copying data into spreadsheets, and manually deduplicating entries — a slow, error-prone process that produced inconsistent daily reports.
 
-## Архитектура (9 компонентов)
+## Solution
 
-1. config.py
-   Конфигурация, пути, regex, таймзона.
+Automated pipeline that reliably converts notifications into canonical events and exports:
 
-2. parsers.py
-   Парсинг устройства, времени, URL и баланса.
+- Ingest: Telethon handlers detect configured trigger text and enqueue jobs.
+- Enrich: Playwright fetches the latest device message for accurate state.
+- Persist: deterministic deduplication and CSV-first storage for auditability.
+- Report: single-command XLSX generation and delivery via the bot for operations.
 
-3. repositories/csv_repository.py
-   Работа с events.csv и daily_groups.csv.
+## Key features
 
-4. services/export_service.py
-   Экспорт CSV в XLSX.
+- Async, queue-based ingestion and worker processing (asyncio) for backpressure control.
+- Site enrichment via Playwright (persistent profile + headless modes).
+- Deterministic deduplication using last-seen fingerprints.
+- CSV-first persistence as canonical audit logs; XLSX export for stakeholders.
+- Operator tooling: `authenticator.py` (profile setup), `/script` report command.
 
-5. services/trademo_client.py
-   Получение последнего сообщения устройства через Playwright (offline/online).
+## Architecture overview
 
-6. services/dedup_service.py
-   Проверка и запоминание дублей сообщений.
+Telegram handlers enqueue processing jobs to an async queue. Workers dequeue jobs, call the Playwright client for site enrichment, apply deduplication logic, and persist canonical rows to CSV. An export service reads CSVs and produces XLSX reports on demand.
 
-7. use_cases/offline_backfill.py
-   Сценарий оффлайн-сбора за вчера.
+```mermaid
+flowchart LR
+    TG[Telegram Signals] --> H[bot/handlers.py]
+    H --> Q[Async Queue]
+    Q --> W[use_cases/online_queue_worker.py]
+    W --> P[use_cases/process_signal.py]
+    P --> C[services/trademo_client.py]
+    P --> R[repositories/csv_repository.py]
+    R --> E[data/events.csv]
+    R --> D[data/daily_groups.csv]
+    CMD[/script command] --> X[services/export_service.py]
+    X --> XLS[data/exports/*.xlsx]
+```
 
-8. use_cases/process_signal.py
-   Сценарий обработки одного входящего сигнала.
+## Tech stack
 
-9. bot/handlers.py
-   Telegram-хендлеры: сигналы и команда /script.
+- Python 3.10+ (asyncio)
+- Telethon (Telegram)
+- Playwright (Chromium persistent context)
+- openpyxl (XLSX export)
+- Python standard library CSV module for canonical storage
 
-Точка входа приложения:
-- app.py
+## Key engineering decisions
 
-Совместимость со старым запуском:
-- beta_make_all2.py (тонкий launcher, вызывает app.main)
+- CSV-first canonical store: simple, human-readable audit trail that is portable and easy to inspect.
+- Async queue + worker model: separates fast ingestion from potentially slow enrichment and controls concurrency.
+- Playwright persistent profile: balances authenticated scraping reliability with headless automation.
+- Environment-driven secrets: `.env` + `.gitignore` to avoid leaking credentials and to ease environment promotion.
 
-## Зависимости
+## Challenges & mitigations
 
-Минимально нужны:
-- telethon
-- playwright
-- openpyxl
+- Playwright variability: explicit timeouts, retries with backoff, and both persistent and ephemeral contexts to reduce flakiness.
+- Duplicate alerts: deterministic fingerprinting and last-seen memory ensure idempotent writes.
+- Authenticated scraping in CI/servers: `authenticator.py` to bootstrap a persistent profile and support headless mode for ephemeral runs.
 
-Установка:
+## Ownership
 
-    python3 -m pip install telethon playwright openpyxl
+- Designed and implemented the end-to-end pipeline: ingestion (`bot/handlers.py`), worker orchestration (`use_cases/online_queue_worker.py`), enrichment (`services/trademo_client.py`), persistence (`repositories/csv_repository.py`), export (`services/export_service.py`).
+- Implemented reliability and ops features: deterministic deduplication, environment-driven configuration, and operator utilities (`authenticator.py`).
+- Assembled a production-style repository with `README.md`, `.env.example`, and tooling to bootstrap authenticated Playwright profiles.
 
-Если браузеры Playwright еще не установлены:
+## Business impact
 
-    python3 -m playwright install chromium
-
-Примечание: в коде используется channel="chrome", поэтому должен быть установлен Google Chrome.
-
-## Настройка
-
-Проверь значения в config.py:
-- api_id
-- api_hash
-- session_name
-- chat
-- CONTROL_CHAT
-
-Также убедись, что существует и актуален профиль браузера:
-- trademo-profile/
-
-## Запуск
-
-Рекомендуемый запуск:
-
-    python3 app.py
-
-Запуск через прежний файл:
-
-    python3 beta_make_all2.py
-
-## Данные и экспорт
-
-- Сырые события: data/events.csv
-- Дневная агрегация: data/daily_groups.csv
-- Экспорт: data/exports/events.xlsx
-- Экспорт: data/exports/daily_groups.xlsx
-
-## Команды бота
-
-- /script в CONTROL_CHAT:
-  - пересобирает агрегат daily_groups.csv;
-  - генерирует XLSX-файлы;
-  - отправляет отчеты в чат.
-
-## Типичный поток работы
-
-1. Приложение стартует и инициализирует файлы.
-2. Выполняет оффлайн-прогон за вчера.
-3. Переходит в online-режим и ждет новые сообщения.
-4. Для каждого сигнала получает последнее сообщение устройства с сайта.
-5. Пишет событие в events.csv и обновляет daily_groups.csv (если не дубль).
-
-## Важно по безопасности
-
-Секреты сейчас хранятся в коде (api_id/api_hash). Лучше вынести их в переменные окружения и не хранить в репозитории.
+- Removes manual verification and spreadsheet maintenance from a daily operational task.
+- Provides an auditable CSV trail that improves confidence in daily reports.
+- Enables faster, consistent reporting to stakeholders with a single operator command.
